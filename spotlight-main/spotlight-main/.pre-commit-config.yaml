@@ -1,0 +1,76 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+    # local hooks
+    - repo: local
+      hooks:
+          - id: ruff-format
+            name: ruff format
+            entry: uv run ruff format --exit-non-zero-on-format
+            language: system
+            types_or: [python, jupyter]
+            files: ^(playbook|renumics|scripts|tests)/
+          - id: ruff-check
+            name: ruff check
+            entry: uv run ruff check --fix --show-fixes --exit-non-zero-on-fix
+            language: system
+            types: [python]
+            files: ^(renumics|scripts|tests)/
+          - id: mypy
+            name: mypy
+            entry: uv run mypy --show-traceback
+            language: system
+            types: [python]
+            files: ^(renumics|scripts|tests)/
+            require_serial: true
+          - id: prettier
+            name: prettier
+            language: system
+            entry: pnpm exec prettier --write
+            files: ^.*\.(js|jsx|ts|tsx|json|yaml|css)$
+          - id: eslint
+            name: eslint
+            language: system
+            entry: pnpm exec eslint
+            files: ^src/.*\.(js|jsx|ts|tsx)$
+          - id: tsc
+            name: tsc
+            language: system
+            entry: pnpm exec tsc --noEmit
+            pass_filenames: false
+            stages: [pre-push]
+
+    # "official" pre-commit hooks
+    - repo: https://github.com/pre-commit/pre-commit-hooks
+      rev: v6.0.0
+      hooks:
+          - id: trailing-whitespace
+            exclude: \.secret\.
+          - id: end-of-file-fixer
+            exclude: \.secret\.
+          - id: check-added-large-files
+          - id: check-merge-conflict
+          - id: check-executables-have-shebangs
+          - id: check-yaml
+            exclude: (\.secret\.)|(^\.github/.*\.yml)
+          - id: check-json
+          - id: check-toml
+          - id: check-symlinks
+
+    # third-pary hooks
+    - repo: https://github.com/python-jsonschema/check-jsonschema
+      rev: 0.37.1
+      hooks:
+          - id: check-github-actions
+          - id: check-github-workflows
+    - repo: https://github.com/jumanjihouse/pre-commit-hooks
+      rev: 3.0.0
+      hooks:
+          - id: shellcheck
+          - id: shfmt
+    - repo: https://github.com/kynan/nbstripout
+      rev: 0.9.1
+      hooks:
+          - id: nbstripout

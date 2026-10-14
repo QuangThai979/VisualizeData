@@ -1,0 +1,20 @@
+# Python: 3.9 - 3.11 (đã kiểm thử trên Python 3.9.13)
+# Cài đặt: python -m pip install -r requirements.txt
+
+# --- Lõi xử lý dữ liệu ---
+numpy==2.0.2
+pandas==2.3.3
+scikit-learn==1.6.1
+pyarrow==21.0.0        # đọc file .parquet
+openpyxl>=3.1          # đọc file .xlsx (tùy chọn)
+
+# --- Phát hiện outlier ---
+pyod==3.6.7
+
+# --- Vẽ biểu đồ tĩnh ---
+matplotlib==3.9.4
+seaborn==0.13.2
+pillow==11.3.0         # đọc ảnh, trích đặc trưng ảnh
+
+# --- Web UI offline ---
+renumics-spotlight>=1.6.0

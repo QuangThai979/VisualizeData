@@ -1,0 +1,502 @@
+name: CI
+
+# We only need `push` triggering event internal, otherwise the workflow will run
+# twice. But for forks, we need to run workflow on both `push` and `pull_request`.
+# So in case of `pull_request` we check that HEAD is not 'Renumics/spotlight'.
+
+on:
+    - push
+    - pull_request
+
+permissions:
+    contents: read
+
+# As long as we use local actions, checkout should be made in workflow before
+# and not in the local actions. Otherwise, no action file found.
+# Checkout with `fetch-depth: 0` is needed by `uv-dynamic-versioning` to get
+# the right package version.
+
+jobs:
+    # Prepare stage
+    prepare-python:
+        name: '🐍 Prepare Python'
+        if: github.event.pull_request.head.repo.full_name != 'Renumics/spotlight'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              id: setup-python-and-uv
+              uses: ./.github/actions/setup-python-and-uv
+        outputs:
+            version: ${{ steps.setup-python-and-uv.outputs.package-version }}
+    prepare-node:
+        name: '⬢ Prepare Node.js'
+        if: github.event.pull_request.head.repo.full_name != 'Renumics/spotlight'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '⬢ Set up pnpm environment'
+              uses: ./.github/actions/setup-node-and-pnpm
+    # Check stage
+    check-pr:
+        name: '🔍 Check if pull request'
+        if: github.event.pull_request.head.repo.full_name != 'Renumics/spotlight'
+        permissions:
+            pull-requests: read
+        runs-on: ubuntu-latest
+        steps:
+            - name: '🔍 Check if pull request'
+              id: check-pr
+              uses: 8BitJonny/gh-get-current-pr@4056877062a1f3b624d5d4c2bedefa9cf51435c9
+              with:
+                  filterOutClosed: true
+        outputs:
+            is-pr: ${{ steps.check-pr.outputs.pr_found }}
+            number: ${{ steps.check-pr.outputs.number }}
+    check:
+        name: '🔍 Check'
+        needs:
+            - prepare-python
+            - prepare-node
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '⬢ Set up pnpm environment'
+              id: setup
+              uses: ./.github/actions/setup-node-and-pnpm
+            - name: Run shellcheck
+              if: success() || steps.setup.outcome == 'success'
+              uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38
+              with:
+                  ignore_paths: .venv node_modules
+            - name: Check code formatting
+              if: success() || steps.setup.outcome == 'success'
+              run: make format
+            - name: Lint code
+              if: success() || steps.setup.outcome == 'success'
+              run: make lint
+            - name: Check code types
+              if: success() || steps.setup.outcome == 'success'
+              run: make typecheck
+    # Build stage
+    build-test-matrix:
+        name: '🧱 Build test matrix'
+        needs:
+            - check-pr
+        runs-on: ubuntu-latest
+        # `MATRIX` environment variable is set by the local `generate-matrix`
+        # action, so use it as check.
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+            - name: '🧱 Build test matrix for pull request'
+              if: needs.check-pr.outputs.is-pr == 'true'
+              uses: druzsan/setup-matrix@dda6d0cfa6d875b9a4dadffdbfc4993f7790bf79
+              with:
+                  matrix: |
+                      os: [ubuntu-latest]
+                      python-version: [3.10, 3.11, 3.12, 3.13, 3.14]
+            - name: '🧱 Build test matrix for release'
+              if: env.MATRIX == '' && startsWith(github.ref, 'refs/tags/v')
+              uses: druzsan/setup-matrix@dda6d0cfa6d875b9a4dadffdbfc4993f7790bf79
+              with:
+                  matrix: |
+                      os: [ubuntu-latest, windows-latest, macos-latest]
+                      python-version: [3.10, 3.11, 3.12, 3.13, 3.14]
+            - name: '🧱 Build test matrix for main branch'
+              if: env.MATRIX == '' && github.ref == 'refs/heads/main'
+              uses: druzsan/setup-matrix@dda6d0cfa6d875b9a4dadffdbfc4993f7790bf79
+              with:
+                  matrix: |
+                      os: [ubuntu-latest]
+                      python-version: [3.10, 3.11, 3.12, 3.13, 3.14]
+                      include:
+                          - os: windows-latest
+                            python-version: 3.12
+                          - os: macos-latest
+                            python-version: 3.12
+            - name: '🧱 Build test matrix for development branch'
+              if: env.MATRIX == ''
+              uses: druzsan/setup-matrix@dda6d0cfa6d875b9a4dadffdbfc4993f7790bf79
+              with:
+                  matrix: |
+                      os: [ubuntu-latest]
+                      python-version: [3.12]
+            - name: Print matrix
+              run: echo "$MATRIX" | yq -P '{"matrix":.}'
+            - name: Set output
+              id: set-matrix
+              run: echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+        outputs:
+            matrix: ${{ steps.set-matrix.outputs.matrix }}
+    build-docs:
+        name: '📝 Build docs'
+        needs:
+            - prepare-python
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '📝 Build docs'
+              run: make docs
+            - name: '📥 Store docs'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: docs-${{ needs.prepare-python.outputs.version }}
+                  path: build/docs/site/
+                  if-no-files-found: error
+            - name: '📦 Upload GitHub Pages artifact'
+              uses: actions/upload-pages-artifact@v3
+              with:
+                  path: build/docs/site/
+    build-datasets:
+        name: '🗃 Build datasets'
+        needs:
+            - prepare-python
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '🗃 Build datasets'
+              if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+              run: make datasets
+            - name: '🗃🗃 Build all datasets'
+              if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+              run: make all-datasets
+            - name: '📥 Store datasets'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: datasets-${{ needs.prepare-python.outputs.version }}
+                  path: build/datasets/
+                  if-no-files-found: error
+    build-spotlight:
+        name: '🧱 Build Spotlight'
+        needs:
+            - prepare-python
+            - prepare-node
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv'
+              uses: ./.github/actions/setup-python-and-uv
+              with:
+                  install-dependencies: false
+            - name: '⬢ Set up pnpm environment'
+              uses: ./.github/actions/setup-node-and-pnpm
+            - name: '🧱 Build frontend'
+              run: make build-frontend
+            - name: '📥 Store frontend'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: .frontend-${{ needs.prepare-python.outputs.version }}
+                  path: build/frontend/
+                  if-no-files-found: error
+            - name: Build Spotlight
+              run: make build-wheel
+            - name: '📥 Store Spotlight'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: renumics-spotlight-${{ needs.prepare-python.outputs.version }}
+                  path: build/dist/renumics_spotlight*.whl
+                  if-no-files-found: error
+    # Test stage
+    check-wheel-contents:
+        name: '🔍 Check wheel contents'
+        needs:
+            - prepare-python
+            - build-spotlight
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '📤 Restore Spotlight Wheel'
+              uses: actions/download-artifact@v8
+              with:
+                  name: renumics-spotlight-${{ needs.prepare-python.outputs.version }}
+                  path: build/dist
+            - name: Check wheel contents
+              run: make check-wheel
+    unit-test:
+        name: '🧪 Unit Test'
+        needs:
+            - prepare-python
+            - prepare-node
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '⬢ Set up pnpm environment'
+              uses: ./.github/actions/setup-node-and-pnpm
+            - name: Execute unit tests
+              run: make unit-test
+    doc-test:
+        name: '🧪 Doc Test'
+        needs:
+            - prepare-python
+            - prepare-node
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '⬢ Set up pnpm environment'
+              uses: ./.github/actions/setup-node-and-pnpm
+            - name: Execute doc tests
+              run: make doc-test
+    ui-test:
+        name: '🧪 UI Test'
+        needs:
+            - prepare-python
+            - build-datasets
+            - build-spotlight
+        strategy:
+            fail-fast: false
+            matrix:
+                browser:
+                    - chrome
+                    - firefox
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🐍 Set up uv environment'
+              uses: ./.github/actions/setup-python-and-uv
+            - name: '📤 Restore datasets'
+              uses: actions/download-artifact@v8
+              with:
+                  name: datasets-${{ needs.prepare-python.outputs.version }}
+                  path: build/datasets/
+            - name: '📤 Restore frontend'
+              uses: actions/download-artifact@v8
+              with:
+                  name: .frontend-${{ needs.prepare-python.outputs.version }}
+                  path: build/frontend/
+            - name: '🎨 Set up Chrome driver'
+              if: matrix.browser == 'chrome'
+              id: setup-chromedriver
+              uses: nanasess/setup-chromedriver@e93e57b843c0c92788f22483f1a31af8ee48db25
+            - name: '🦊 Set up Gecko driver'
+              id: setup-geckodriver
+              if: matrix.browser == 'firefox'
+              run: |
+                  curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest \
+                  | jq -r '.assets | map(select(.name | test("^geckodriver-v.*-linux64.tar.gz$")))[0].browser_download_url' \
+                  | xargs wget -O ${{ runner.temp }}/geckodriver.tar.gz
+                  tar -xzf ${{ runner.temp }}/geckodriver.tar.gz -C /usr/local/bin/
+            - name: Download screenshots of the last commit on main
+              continue-on-error: true
+              env:
+                  AZURE_FOLDER_URL: https://spotlightpublic.blob.core.windows.net/github-public/${{ github.repository }}
+              run: |
+                  MAIN_COMMITS="$(curl -L \
+                      -H "Accept: application/vnd.github+json" \
+                      -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"\
+                      -H "X-GitHub-Api-Version: 2022-11-28" \
+                      https://api.github.com/repos/${{ github.repository }}/commits)"
+                  INDEX=$([ "$GITHUB_REF" = "refs/heads/main" ] && echo 1 || echo 0)
+                  COMMIT_SHA=$(echo "$MAIN_COMMITS" | jq -r ".[$INDEX].sha")
+                  mkdir -p build/ui_tests/old-screenshots
+                  cd build/ui_tests/old-screenshots
+                  curl -fLO ${AZURE_FOLDER_URL}/${COMMIT_SHA}/screenshots/gui-${{ matrix.browser }}.png
+            - name: '🍱 Test UI on ${{ matrix.browser }}'
+              run: make ui-test-${{ matrix.browser }}
+            - name: Prepare GUI screenshots
+              if: |
+                  success()
+                  || steps.setup-chromedriver.outcome == 'success'
+                  || steps.setup-geckodriver.outcome == 'success'
+              run: |
+                  mkdir -p build/upload/screenshots
+                  cp build/ui_tests/screenshots/gui*.png build/upload/screenshots
+                  if [ "$GITHUB_REF" = "refs/heads/main" ]
+                  then
+                      touch build/upload/screenshots/.is-main
+                  fi
+            - name: '📸 Upload GUI screenshots'
+              if: |
+                  github.actor != 'dependabot[bot]' && (
+                    success()
+                    || steps.setup-chromedriver.outcome == 'success'
+                    || steps.setup-geckodriver.outcome == 'success'
+                  ) && (
+                    (
+                      github.event_name == 'push'
+                      && github.repository == 'Renumics/spotlight'
+                    ) || (
+                      github.event_name == 'pull_request'
+                      && github.event.pull_request.head.repo.full_name == 'Renumics/spotlight'
+                    )
+                  )
+              uses: LanceMcCarthy/Action-AzureBlobUpload@caa002d5a92f7436062e44f38031c0c3ff17011e
+              with:
+                  connection_string: ${{ secrets.AZURE_CONNECTION_STRING }}
+                  container_name: github-public
+                  source_folder: build/upload/screenshots
+                  destination_folder: ${{ github.repository }}/${{ github.sha }}/screenshots
+                  delete_if_exists: true
+            - name: '📥 Store UI test on ${{ matrix.browser }} results'
+              if: |
+                  success()
+                  || steps.setup-chromedriver.outcome == 'success'
+                  || steps.setup-geckodriver.outcome == 'success'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: .ui-test-${{ matrix.browser }}-${{ needs.prepare-python.outputs.version }}
+                  path: build/ui_tests
+                  if-no-files-found: error
+    integration-test:
+        name: '🧪 Integration Test'
+        needs:
+            - prepare-python
+            - build-test-matrix
+            - build-datasets
+            - build-spotlight
+        strategy:
+            fail-fast: false
+            matrix: ${{fromJson(needs.build-test-matrix.outputs.matrix)}}
+        runs-on: ${{ matrix.os }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '🎥 Set up FFMpeg (Ubuntu)'
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y ffmpeg
+            - name: '🎥 Set up FFMpeg (Windows)'
+              if: runner.os == 'Windows'
+              uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+              with:
+                  linking-type: shared
+            - name: '🎥 Set up FFMpeg (MacOS)'
+              if: runner.os == 'macOS'
+              run: |
+                  brew update
+                  brew install ffmpeg
+            - name: '🐍 Set up Python ${{ matrix.python-version }}'
+              uses: actions/setup-python@v6
+              with:
+                  python-version: ${{ matrix.python-version }}
+                  cache: 'pip'
+            - name: '📤 Restore Spotlight'
+              uses: actions/download-artifact@v8
+              with:
+                  name: renumics-spotlight-${{ needs.prepare-python.outputs.version }}
+                  path: build/dist
+            - name: '📤 Restore datasets'
+              uses: actions/download-artifact@v8
+              with:
+                  name: datasets-${{ needs.prepare-python.outputs.version }}
+                  path: build/datasets/
+            - name: Install Spotlight
+              id: setup
+              run: |
+                  pip install --upgrade pip setuptools wheel
+                  pip install --extra-index-url https://download.pytorch.org/whl/cpu --find-links build/dist/ renumics-spotlight[analyzers,torch]==${{ needs.prepare-python.outputs.version }} pytest
+            - name: Test Spotlight start (Windows)
+              if: runner.os == 'Windows' && (success() || steps.setup.outcome == 'success')
+              run: ./scripts/Test-SpotlightStart.ps1
+            - name: Test Spotlight start (Ubuntu, MacOS)
+              if: runner.os != 'Windows' && (success() || steps.setup.outcome == 'success')
+              run: |
+                  function teardown {
+                      while kill -INT %% 2>/dev/null; do sleep 0; done  # kill all child processes
+                  }
+                  trap teardown EXIT
+                  PORT="5005"
+                  spotlight --host 127.0.0.1 --port $PORT --no-browser data/tables/tallymarks-small.h5 &
+                  URL="http://127.0.0.1:${PORT}"
+                  wget -t20 -w0.5 --retry-connrefused --delete-after $URL
+                  sleep 0.5
+                  GENERATION_ID=$(wget -qO- "${URL}/api/table/" | jq ".generation_id")
+                  wget --delete-after "${URL}/api/table/number/42?generation_id=${GENERATION_ID}"
+            - name: Execute integration tests
+              if: success() || steps.setup.outcome == 'success'
+              run: pytest --durations=5 tests/integration
+    # Release stage
+    release:
+        name: '🚀 Release Spotlight'
+        if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'Renumics/spotlight'
+        needs:
+            - prepare-python
+            - prepare-node
+            - check-pr
+            - check
+            - build-test-matrix
+            - build-docs
+            - build-datasets
+            - build-spotlight
+            - check-wheel-contents
+            - doc-test
+            - unit-test
+            - integration-test
+            - ui-test
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - name: '📤 Restore core Spotlight'
+              uses: actions/download-artifact@v8
+              with:
+                  name: renumics-spotlight-${{ needs.prepare-python.outputs.version }}
+                  path: dist
+            - name: '🚀 Publish Spotlight to PyPI'
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e
+              with:
+                  password: ${{ secrets.PYPI_API_TOKEN }}
+    deploy-docs:
+        name: '📖 Deploy docs to GitHub Pages'
+        # Deploy the latest docs on every push to main.
+        if: github.ref == 'refs/heads/main' && github.repository == 'Renumics/spotlight'
+        needs:
+            - build-docs
+        permissions:
+            pages: write
+            id-token: write
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        runs-on: ubuntu-latest
+        steps:
+            - name: '📖 Deploy to GitHub Pages'
+              id: deployment
+              uses: actions/deploy-pages@v4

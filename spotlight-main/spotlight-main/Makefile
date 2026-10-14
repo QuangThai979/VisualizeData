@@ -1,0 +1,190 @@
+SHELL := bash
+.ONESHELL:
+.SHELLFLAGS := -eu -o pipefail -c
+MAKEFLAGS += --warn-undefined-variables
+MAKEFLAGS += --no-builtin-rules
+
+export VERSION := $(shell uv run uv-dynamic-versioning)
+
+.PHONY: help
+help: ## Print this help message
+	@echo -e "$$(grep -hE '^\S+:.*##' $(MAKEFILE_LIST) | sed -e 's/:.*##\s*/:/' -e 's/^\(.\+\):\(.*\)/\\x1b[36m\1\\x1b[m:\2/' | column -c2 -t -s :)"
+
+.PHONY: init
+init: ## Locally install all dev dependencies
+	uv sync --all-extras --no-group playbook
+	pnpm install
+
+.PHONY: init-playbook
+init-playbook: ## Locally install all playbook dev dependencies
+	uv sync --all-extras --all-groups
+
+.PHONY: clean
+clean: ## clean project
+	rm -rf build/ .pytest_cache/ .ruff_cache/ .mypy_cache/ .venv/ node_modules/
+
+.PHONY: format
+format: ## Fix code formatting
+	uv run pre-commit run ruff-format --all-files
+	uv run pre-commit run prettier --all-files
+
+.PHONY: lint
+lint: ## Lint all source files
+	uv run pre-commit run ruff-check --all-files
+	uv run pre-commit run eslint --all-files
+
+.PHONY: typecheck
+typecheck: ## Typecheck all source files
+	uv run pre-commit run mypy --all-files
+	pnpm exec tsc --noEmit
+
+TABLE_FILE ?= "data/tables/tallymarks-small.h5"
+.PHONY: dev
+dev: ## Start dev setup
+	SPOTLIGHT_TABLE_FILE=$(TABLE_FILE) SPOTLIGHT_DEV=$${SPOTLIGHT_DEV:-true} uv run spotlight --analyze-all
+
+.PHONY: datasets
+datasets: ## Build datasets (only needed for UI tests)
+	mkdir -p build/datasets/
+	uv run python ./scripts/generate_test_csv.py -o build/datasets/
+	uv run python ./scripts/generate_demo_test_data.py -o build/datasets/
+	uv run python ./scripts/generate_performance_test_data.py -o build/datasets/
+
+.PHONY: all-datasets
+all-datasets: ## Build all datasets
+all-datasets: datasets
+	mkdir -p build/datasets/
+	uv run python ./scripts/generate_multimodal_test_data.py -o build/datasets/
+	uv run python ./scripts/generate_demo_test_data_ultra.py -o build/datasets/
+
+.PHONY: build
+build: ## Build package
+build: build-frontend build-wheel
+
+.PHONY: build-frontend
+build-frontend: ## Build react frontend
+	NODE_OPTIONS=--max-old-space-size=32768 pnpm run build
+
+.PHONY: build-wheel
+build-wheel: ## Build installable python package
+	[ -d "build/frontend" ] || (echo "Frontend directory missing! Build frontend first."; exit 1)
+	function onexit {
+		# remove local dist directory
+		rm -rf dist
+		# reset version file
+		sed -i 's/^\(__version__ = \).*/\1"0.0.0"/' renumics/spotlight/__version__.py
+		# reset symlink for frontend
+		rm -rf renumics/spotlight/backend/statics
+		ln -nsf ../../../build/frontend renumics/spotlight/backend/statics
+	}
+	trap onexit EXIT
+	sed -i 's/^\(__version__ = \).*/\1"$(VERSION)"/' renumics/spotlight/__version__.py
+	rm renumics/spotlight/backend/statics
+	cp -Tr build/frontend renumics/spotlight/backend/statics
+	uv build
+	mkdir -p build/dist/
+	mv dist/*.whl build/dist/
+
+.PHONY: check-wheel
+check-wheel: ## Check wheel content
+	uv run check-wheel-contents build/dist/renumics_spotlight*
+
+.PHONY: test
+test: ## Execute all tests (unit/doc/integration/ui)
+test: unit-test doc-test integration-test ui-test
+
+.PHONY: unit-test
+unit-test: ## Execute unit tests
+	export SPOTLIGHT_DEV=False
+	uv run pytest --durations=5 tests/unit
+	pnpm run test
+
+.PHONY: doc-test
+doc-test: ## Execute doc tests
+	export SPOTLIGHT_DEV=False
+	uv run pytest --durations=5 --doctest-modules --pyargs renumics
+
+.PHONY: integration-test
+integration-test: ## Execute integration-tests
+	export SPOTLIGHT_DEV=False
+	uv run pytest --durations=5 tests/integration
+
+.PHONY: ui-test
+ui-test: ## Execute ui tests
+ui-test: ui-test-chrome ui-test-firefox
+
+.PHONY: .ui-test-chrome
+.ui-test-chrome:
+	uv run pytest --durations=5 -s --backendBaseUrl=$$BACKEND_BASE_URL --frontendBaseUrl=$$FRONTEND_BASE_URL $${CI:+--headless} tests/ui
+
+.PHONY: .ui-test-firefox
+.ui-test-firefox:
+	uv run pytest --durations=5 -s -m "not skip_firefox" --backendBaseUrl=$$BACKEND_BASE_URL --frontendBaseUrl=$$FRONTEND_BASE_URL $${CI:+--headless} --browser firefox tests/ui
+
+.PHONY: ui-test-%
+ui-test-%:
+	export SPOTLIGHT_DEV=False
+	function teardown {
+		while kill -INT %% 2>/dev/null; do sleep 0; done  # kill all child processes
+	}
+	trap teardown EXIT
+	PORT="5005"
+	uv run spotlight --host 127.0.0.1 --port $$PORT --no-browser  --folder . &
+	export BACKEND_BASE_URL="http://127.0.0.1:$${PORT}"
+	export FRONTEND_BASE_URL="http://127.0.0.1:$${PORT}"
+	wget -q -t20 -w0.5 --retry-connrefused --delete-after "$$BACKEND_BASE_URL"
+	sleep 1
+	$(MAKE) .$@
+
+.PHONY: test-spotlight-start
+test-spotlight-start: ## Test Spotlight start (Spotlight should be installed)
+	export SPOTLIGHT_DEV=False
+	function teardown {
+		while kill -INT %% 2>/dev/null; do sleep 0; done  # kill all child processes
+	}
+	trap teardown EXIT
+	PORT="5005"
+	spotlight --host 127.0.0.1 --port $$PORT --no-browser data/tables/tallymarks-small.h5 &
+	URL="http://127.0.0.1:$${PORT}"
+	wget -q -t20 -w0.5 --retry-connrefused --delete-after $$URL
+	sleep 0.5
+	GENERATION_ID=$$(wget -qO- "$${URL}/api/table/" | jq ".generation_id")
+	wget --delete-after "$${URL}/api/table/number/42?generation_id=$${GENERATION_ID}"
+
+.PHONY: docs
+docs: ## Build the documentation site (MkDocs) into build/docs/site
+	uv run mkdocs build
+
+.PHONY: docs-serve
+docs-serve: ## Serve the documentation site locally with live reload
+	uv run mkdocs serve
+
+AZURE_FOLDER_URL ?= "https://spotlightpublic.blob.core.windows.net/github-public/Renumics/spotlight-temp"
+.PHONY: old-screenshots
+old-screenshots: ## Generate the API spec and migrations
+	TARGET_FOLDER="build/ui_tests/old-screenshots"
+	rm -rf "$$TARGET_FOLDER"
+	git fetch --all || true
+	BRANCH="$$(git rev-parse --abbrev-ref HEAD)"
+	COMMIT_SHA="$$([ "$$BRANCH" = "main" ] && git rev-parse main~ || git rev-parse main)"
+	mkdir -p "$$TARGET_FOLDER"
+	cd "$$TARGET_FOLDER"
+	curl -fLO "${AZURE_FOLDER_URL}/$${COMMIT_SHA}/screenshots/gui-chrome.png" || true
+	curl -fLO "${AZURE_FOLDER_URL}/$${COMMIT_SHA}/screenshots/gui-firefox.png" || true
+
+.PHONY: api-client
+api-client: ## Generate API Spec and CLient
+	export SPOTLIGHT_DEV=False
+	rm -rf /tmp/spotlight-api-client
+	mkdir -p /tmp/spotlight-api-client
+	uv run python ./scripts/generate_api_spec.py -o /tmp/spotlight-api-spec.json
+	pnpm exec openapi-generator-cli generate -g typescript-fetch \
+		-i /tmp/spotlight-api-spec.json -o /tmp/spotlight-api-client
+	# Fix generated code for multiple! file upload.
+	# This is supported by oai 3 but openapi-generator does not support it (yet).
+	find /tmp/spotlight-api-client \
+		-type f -exec sed -i -e "s/formData.append('mesh_files',.*$$/for (let meshFile of requestParameters.meshFiles) { formData.append('mesh_files', meshFile) }/g" {} \;
+	# replace existing code
+	rsync -a --delete /tmp/spotlight-api-client/ "./src/client"
+	# auto format generated code
+	pnpm exec prettier --write './src/client/**/*.{js,jsx,ts,tsx,json,yaml,css}'
